@@ -17,11 +17,14 @@
 package org.apache.nifi.processors.aws.s3;
 
 import java.io.IOException;
+import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 import org.apache.nifi.components.PropertyDescriptor;
 import org.apache.nifi.components.state.Scope;
@@ -50,6 +53,12 @@ import static org.junit.Assert.assertTrue;
 
 
 public class TestListS3 {
+    // S3 API returns 1000 max-keys by default (see https://docs.aws.amazon.com/AmazonS3/latest/API/v2-RESTBucketGET.html)
+    private final static int MAX_KEYS = 1000;
+    // S3 region name
+    private final static String TEST_REGION= "eu-west-1";
+    // S3 bucket name
+    private final static String TEST_BUCKET = "test-bucket";
 
     private TestRunner runner = null;
     private ListS3 mockListS3 = null;
@@ -69,6 +78,9 @@ public class TestListS3 {
     }
 
 
+    /**
+     * Basic listing
+     */
     @Test
     public void testList() {
         runner.setProperty(ListS3.REGION, "eu-west-1");
@@ -111,6 +123,98 @@ public class TestListS3 {
         flowFiles.get(1).assertAttributeEquals("filename", "b/c");
         flowFiles.get(2).assertAttributeEquals("filename", "d/e");
         runner.getStateManager().assertStateEquals(ListS3.CURRENT_TIMESTAMP, lastModifiedTimestamp, Scope.CLUSTER);
+    }
+
+    /**
+     * Large listing that exceeds the MAX_KEYS value such that the do/while loop in ListS3 is executed more than once
+     */
+    @Test
+    public void testLargeList() {
+        runner.setProperty(ListS3.REGION, "eu-west-1");
+        runner.setProperty(ListS3.BUCKET, "test-bucket");
+
+        Date lastModified = new Date();
+        ObjectListing objectListing = new ObjectListing();
+        int keysWritten = (int) (MAX_KEYS*1.5);
+
+        for (int i = 0; i < keysWritten; i++) {
+            S3ObjectSummary objectSummary = new S3ObjectSummary();
+            objectSummary.setBucketName("test-bucket");
+            objectSummary.setKey(Integer.toString(i));
+            objectSummary.setLastModified(lastModified);
+            objectListing.getObjectSummaries().add(objectSummary);
+        }
+
+        Mockito.when(mockS3Client.listObjects(Mockito.any(ListObjectsRequest.class))).thenReturn(objectListing);
+
+        runner.run();
+
+        ArgumentCaptor<ListObjectsRequest> captureRequest = ArgumentCaptor.forClass(ListObjectsRequest.class);
+        Mockito.verify(mockS3Client, Mockito.times(1)).listObjects(captureRequest.capture());
+        ListObjectsRequest request = captureRequest.getValue();
+        assertEquals("test-bucket", request.getBucketName());
+        Mockito.verify(mockS3Client, Mockito.never()).listVersions(Mockito.any());
+
+        runner.assertAllFlowFilesTransferred(ListS3.REL_SUCCESS, keysWritten);
+        List<MockFlowFile> flowFiles = runner.getFlowFilesForRelationship(ListS3.REL_SUCCESS);
+
+        String lastModifiedTimestamp = String.valueOf(lastModified.getTime());
+        for (int i = 0; i < keysWritten; i++) {
+            MockFlowFile ff = flowFiles.get(i);
+            ff.assertAttributeEquals("s3.bucket", "test-bucket");
+            ff.assertAttributeEquals("s3.lastModified", lastModifiedTimestamp);
+            flowFiles.get(i).assertAttributeEquals("filename", Integer.toString(i));
+        }
+
+        runner.getStateManager().assertStateEquals(ListS3.CURRENT_TIMESTAMP, lastModifiedTimestamp, Scope.CLUSTER);
+    }
+
+    /**
+     * Test two listings with the same max modified timestamp (NIFI-4715)
+     * @throws IOException
+     */
+    @Test
+    public void testTwoListings() throws IOException {
+        runner.setProperty(ListS3.REGION, TEST_REGION);
+        runner.setProperty(ListS3.BUCKET, TEST_BUCKET);
+
+        Date lastModified = new Date();
+        String lastModifiedTimestamp = String.valueOf(lastModified.getTime());
+        ObjectListing objectListing = new ObjectListing();
+
+        // Write "a" key
+        writeKeyToBucket(objectListing, "a", TEST_BUCKET, lastModified);
+        Mockito.when(mockS3Client.listObjects(Mockito.any(ListObjectsRequest.class))).thenReturn(objectListing);
+
+        runner.run();
+
+        // Verify "a" key in stateManager
+        runner.getStateManager().assertStateEquals(ListS3.CURRENT_TIMESTAMP, lastModifiedTimestamp, Scope.CLUSTER);
+        runner.getStateManager().assertStateEquals(ListS3.CURRENT_KEY_PREFIX+"0", "a", Scope.CLUSTER);
+
+        runner.assertAllFlowFilesTransferred(ListS3.REL_SUCCESS, 1);
+        List<MockFlowFile> flowFiles = runner.getFlowFilesForRelationship(ListS3.REL_SUCCESS);
+        assertKeyInBucket(flowFiles.get(0), "a", TEST_BUCKET, lastModified);
+
+        // Clear out flowfiles after run
+        runner.clearTransferState();
+
+        // Write "b" key
+        writeKeyToBucket(objectListing, "b", TEST_BUCKET, lastModified);
+
+        runner.run();
+
+        // Verify "b" key in stateManager
+        runner.assertAllFlowFilesTransferred(ListS3.REL_SUCCESS, 1);
+        flowFiles = runner.getFlowFilesForRelationship(ListS3.REL_SUCCESS);
+        assertKeyInBucket(flowFiles.get(0), "b", TEST_BUCKET, lastModified);
+
+        runner.getStateManager().assertStateEquals(ListS3.CURRENT_TIMESTAMP, lastModifiedTimestamp, Scope.CLUSTER);
+        String key0 = runner.getStateManager().getState(Scope.CLUSTER).get(ListS3.CURRENT_KEY_PREFIX + "0");
+        String key1 = runner.getStateManager().getState(Scope.CLUSTER).get(ListS3.CURRENT_KEY_PREFIX + "1");
+        Set<String> expectedKeys = new HashSet<>(Arrays.asList(key0, key1));
+        Set<String> actualKeys = new HashSet<>(Arrays.asList("a", "b"));
+        assertEquals(expectedKeys, actualKeys);
     }
 
     @Test
@@ -257,5 +361,19 @@ public class TestListS3 {
         assertTrue(pd.contains(ListS3.DELIMITER));
         assertTrue(pd.contains(ListS3.PREFIX));
         assertTrue(pd.contains(ListS3.USE_VERSIONS));
+    }
+
+    private void writeKeyToBucket(ObjectListing objectListing, String key, String bucket, Date lastModified) {
+        S3ObjectSummary objectSummary = new S3ObjectSummary();
+        objectSummary.setBucketName(bucket);
+        objectSummary.setKey(key);
+        objectSummary.setLastModified(lastModified);
+        objectListing.getObjectSummaries().add(objectSummary);
+    }
+
+    private void assertKeyInBucket(MockFlowFile ff, String key, String bucket, Date lastModified) {
+        ff.assertAttributeEquals("filename", key);
+        ff.assertAttributeEquals("s3.bucket", bucket);
+        ff.assertAttributeEquals("s3.lastModified", String.valueOf(lastModified.getTime()));
     }
 }

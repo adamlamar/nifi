@@ -217,6 +217,15 @@ public class TestListS3 {
         assertEquals(expectedKeys, actualKeys);
     }
 
+    /**
+     * TODO: test keys a,b,c that are not in ascending timestamp order
+     */
+    @Test
+    public void testKeysOutOfOrder() {
+
+
+    }
+
     @Test
     public void testListVersion2() {
         runner.setProperty(ListS3.REGION, "eu-west-1");

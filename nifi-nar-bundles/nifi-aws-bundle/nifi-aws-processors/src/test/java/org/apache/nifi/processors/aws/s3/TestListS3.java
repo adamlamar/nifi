@@ -53,7 +53,8 @@ import static org.junit.Assert.assertTrue;
 
 
 public class TestListS3 {
-    // S3 API returns 1000 max-keys by default (see https://docs.aws.amazon.com/AmazonS3/latest/API/v2-RESTBucketGET.html)
+    // S3 API returns 1000 max-keys by default
+    // see https://docs.aws.amazon.com/AmazonS3/latest/API/v2-RESTBucketGET.html
     private final static int MAX_KEYS = 1000;
     // S3 region name
     private final static String TEST_REGION= "eu-west-1";
@@ -83,23 +84,23 @@ public class TestListS3 {
      */
     @Test
     public void testList() {
-        runner.setProperty(ListS3.REGION, "eu-west-1");
-        runner.setProperty(ListS3.BUCKET, "test-bucket");
+        runner.setProperty(ListS3.REGION, TEST_REGION);
+        runner.setProperty(ListS3.BUCKET, TEST_BUCKET);
 
         Date lastModified = new Date();
         ObjectListing objectListing = new ObjectListing();
         S3ObjectSummary objectSummary1 = new S3ObjectSummary();
-        objectSummary1.setBucketName("test-bucket");
+        objectSummary1.setBucketName(TEST_BUCKET);
         objectSummary1.setKey("a");
         objectSummary1.setLastModified(lastModified);
         objectListing.getObjectSummaries().add(objectSummary1);
         S3ObjectSummary objectSummary2 = new S3ObjectSummary();
-        objectSummary2.setBucketName("test-bucket");
+        objectSummary2.setBucketName(TEST_BUCKET);
         objectSummary2.setKey("b/c");
         objectSummary2.setLastModified(lastModified);
         objectListing.getObjectSummaries().add(objectSummary2);
         S3ObjectSummary objectSummary3 = new S3ObjectSummary();
-        objectSummary3.setBucketName("test-bucket");
+        objectSummary3.setBucketName(TEST_BUCKET);
         objectSummary3.setKey("d/e");
         objectSummary3.setLastModified(lastModified);
         objectListing.getObjectSummaries().add(objectSummary3);
@@ -110,14 +111,14 @@ public class TestListS3 {
         ArgumentCaptor<ListObjectsRequest> captureRequest = ArgumentCaptor.forClass(ListObjectsRequest.class);
         Mockito.verify(mockS3Client, Mockito.times(1)).listObjects(captureRequest.capture());
         ListObjectsRequest request = captureRequest.getValue();
-        assertEquals("test-bucket", request.getBucketName());
+        assertEquals(TEST_BUCKET, request.getBucketName());
         Mockito.verify(mockS3Client, Mockito.never()).listVersions(Mockito.any());
 
         runner.assertAllFlowFilesTransferred(ListS3.REL_SUCCESS, 3);
         List<MockFlowFile> flowFiles = runner.getFlowFilesForRelationship(ListS3.REL_SUCCESS);
         MockFlowFile ff0 = flowFiles.get(0);
         ff0.assertAttributeEquals("filename", "a");
-        ff0.assertAttributeEquals("s3.bucket", "test-bucket");
+        ff0.assertAttributeEquals("s3.bucket", TEST_BUCKET);
         String lastModifiedTimestamp = String.valueOf(lastModified.getTime());
         ff0.assertAttributeEquals("s3.lastModified", lastModifiedTimestamp);
         flowFiles.get(1).assertAttributeEquals("filename", "b/c");
@@ -130,8 +131,8 @@ public class TestListS3 {
      */
     @Test
     public void testLargeList() {
-        runner.setProperty(ListS3.REGION, "eu-west-1");
-        runner.setProperty(ListS3.BUCKET, "test-bucket");
+        runner.setProperty(ListS3.REGION, TEST_REGION);
+        runner.setProperty(ListS3.BUCKET, TEST_BUCKET);
 
         Date lastModified = new Date();
         ObjectListing objectListing = new ObjectListing();
@@ -139,7 +140,7 @@ public class TestListS3 {
 
         for (int i = 0; i < keysWritten; i++) {
             S3ObjectSummary objectSummary = new S3ObjectSummary();
-            objectSummary.setBucketName("test-bucket");
+            objectSummary.setBucketName(TEST_BUCKET);
             objectSummary.setKey(Integer.toString(i));
             objectSummary.setLastModified(lastModified);
             objectListing.getObjectSummaries().add(objectSummary);
@@ -152,7 +153,7 @@ public class TestListS3 {
         ArgumentCaptor<ListObjectsRequest> captureRequest = ArgumentCaptor.forClass(ListObjectsRequest.class);
         Mockito.verify(mockS3Client, Mockito.times(1)).listObjects(captureRequest.capture());
         ListObjectsRequest request = captureRequest.getValue();
-        assertEquals("test-bucket", request.getBucketName());
+        assertEquals(TEST_BUCKET, request.getBucketName());
         Mockito.verify(mockS3Client, Mockito.never()).listVersions(Mockito.any());
 
         runner.assertAllFlowFilesTransferred(ListS3.REL_SUCCESS, keysWritten);
@@ -161,7 +162,7 @@ public class TestListS3 {
         String lastModifiedTimestamp = String.valueOf(lastModified.getTime());
         for (int i = 0; i < keysWritten; i++) {
             MockFlowFile ff = flowFiles.get(i);
-            ff.assertAttributeEquals("s3.bucket", "test-bucket");
+            ff.assertAttributeEquals("s3.bucket", TEST_BUCKET);
             ff.assertAttributeEquals("s3.lastModified", lastModifiedTimestamp);
             flowFiles.get(i).assertAttributeEquals("filename", Integer.toString(i));
         }
@@ -218,34 +219,55 @@ public class TestListS3 {
     }
 
     /**
-     * TODO: test keys a,b,c that are not in ascending timestamp order
+     * Test listing keys that are not in ascending modified order
      */
     @Test
     public void testKeysOutOfOrder() {
+        runner.setProperty(ListS3.REGION, TEST_REGION);
+        runner.setProperty(ListS3.BUCKET, TEST_BUCKET);
 
+        Date modified1 = new Date(1000);
+        Date modified2 = new Date(2000);
+        Date modified3 = new Date(3000);
+        ObjectListing objectListing = new ObjectListing();
 
+        // Write a, b, c keys where b is modified after c
+        writeKeyToBucket(objectListing, "a", TEST_BUCKET, modified1);
+        writeKeyToBucket(objectListing, "b", TEST_BUCKET, modified3);
+        writeKeyToBucket(objectListing, "c", TEST_BUCKET, modified2);
+        Mockito.when(mockS3Client.listObjects(Mockito.any(ListObjectsRequest.class))).thenReturn(objectListing);
+
+        runner.run();
+
+        runner.assertAllFlowFilesTransferred(ListS3.REL_SUCCESS, 3);
+        List<MockFlowFile> flowFiles = runner.getFlowFilesForRelationship(ListS3.REL_SUCCESS);
+        assertKeyInBucket(flowFiles.get(0), "a", TEST_BUCKET, modified1);
+        assertKeyInBucket(flowFiles.get(1), "b", TEST_BUCKET, modified3);
+        assertKeyInBucket(flowFiles.get(2), "c", TEST_BUCKET, modified2);
+
+        runner.getStateManager().assertStateEquals(ListS3.CURRENT_TIMESTAMP, Long.toString(modified3.getTime()), Scope.CLUSTER);
     }
 
     @Test
     public void testListVersion2() {
-        runner.setProperty(ListS3.REGION, "eu-west-1");
-        runner.setProperty(ListS3.BUCKET, "test-bucket");
+        runner.setProperty(ListS3.REGION, TEST_REGION);
+        runner.setProperty(ListS3.BUCKET, TEST_BUCKET);
         runner.setProperty(ListS3.LIST_TYPE, "2");
 
         Date lastModified = new Date();
         ListObjectsV2Result objectListing = new ListObjectsV2Result();
         S3ObjectSummary objectSummary1 = new S3ObjectSummary();
-        objectSummary1.setBucketName("test-bucket");
+        objectSummary1.setBucketName(TEST_BUCKET);
         objectSummary1.setKey("a");
         objectSummary1.setLastModified(lastModified);
         objectListing.getObjectSummaries().add(objectSummary1);
         S3ObjectSummary objectSummary2 = new S3ObjectSummary();
-        objectSummary2.setBucketName("test-bucket");
+        objectSummary2.setBucketName(TEST_BUCKET);
         objectSummary2.setKey("b/c");
         objectSummary2.setLastModified(lastModified);
         objectListing.getObjectSummaries().add(objectSummary2);
         S3ObjectSummary objectSummary3 = new S3ObjectSummary();
-        objectSummary3.setBucketName("test-bucket");
+        objectSummary3.setBucketName(TEST_BUCKET);
         objectSummary3.setKey("d/e");
         objectSummary3.setLastModified(lastModified);
         objectListing.getObjectSummaries().add(objectSummary3);
@@ -256,14 +278,14 @@ public class TestListS3 {
         ArgumentCaptor<ListObjectsV2Request> captureRequest = ArgumentCaptor.forClass(ListObjectsV2Request.class);
         Mockito.verify(mockS3Client, Mockito.times(1)).listObjectsV2(captureRequest.capture());
         ListObjectsV2Request request = captureRequest.getValue();
-        assertEquals("test-bucket", request.getBucketName());
+        assertEquals(TEST_BUCKET, request.getBucketName());
         Mockito.verify(mockS3Client, Mockito.never()).listVersions(Mockito.any());
 
         runner.assertAllFlowFilesTransferred(ListS3.REL_SUCCESS, 3);
         List<MockFlowFile> flowFiles = runner.getFlowFilesForRelationship(ListS3.REL_SUCCESS);
         MockFlowFile ff0 = flowFiles.get(0);
         ff0.assertAttributeEquals("filename", "a");
-        ff0.assertAttributeEquals("s3.bucket", "test-bucket");
+        ff0.assertAttributeEquals("s3.bucket", TEST_BUCKET);
         String lastModifiedTimestamp = String.valueOf(lastModified.getTime());
         ff0.assertAttributeEquals("s3.lastModified", lastModifiedTimestamp);
         flowFiles.get(1).assertAttributeEquals("filename", "b/c");
@@ -273,20 +295,20 @@ public class TestListS3 {
 
     @Test
     public void testListVersions() {
-        runner.setProperty(ListS3.REGION, "eu-west-1");
-        runner.setProperty(ListS3.BUCKET, "test-bucket");
+        runner.setProperty(ListS3.REGION, TEST_REGION);
+        runner.setProperty(ListS3.BUCKET, TEST_BUCKET);
         runner.setProperty(ListS3.USE_VERSIONS, "true");
 
         Date lastModified = new Date();
         VersionListing versionListing = new VersionListing();
         S3VersionSummary versionSummary1 = new S3VersionSummary();
-        versionSummary1.setBucketName("test-bucket");
+        versionSummary1.setBucketName(TEST_BUCKET);
         versionSummary1.setKey("test-key");
         versionSummary1.setVersionId("1");
         versionSummary1.setLastModified(lastModified);
         versionListing.getVersionSummaries().add(versionSummary1);
         S3VersionSummary versionSummary2 = new S3VersionSummary();
-        versionSummary2.setBucketName("test-bucket");
+        versionSummary2.setBucketName(TEST_BUCKET);
         versionSummary2.setKey("test-key");
         versionSummary2.setVersionId("2");
         versionSummary2.setLastModified(lastModified);
@@ -298,27 +320,27 @@ public class TestListS3 {
         ArgumentCaptor<ListVersionsRequest> captureRequest = ArgumentCaptor.forClass(ListVersionsRequest.class);
         Mockito.verify(mockS3Client, Mockito.times(1)).listVersions(captureRequest.capture());
         ListVersionsRequest request = captureRequest.getValue();
-        assertEquals("test-bucket", request.getBucketName());
+        assertEquals(TEST_BUCKET, request.getBucketName());
         Mockito.verify(mockS3Client, Mockito.never()).listObjects(Mockito.any(ListObjectsRequest.class));
 
         runner.assertAllFlowFilesTransferred(ListS3.REL_SUCCESS, 2);
         List<MockFlowFile> flowFiles = runner.getFlowFilesForRelationship(ListS3.REL_SUCCESS);
         MockFlowFile ff0 = flowFiles.get(0);
         ff0.assertAttributeEquals("filename", "test-key");
-        ff0.assertAttributeEquals("s3.bucket", "test-bucket");
+        ff0.assertAttributeEquals("s3.bucket", TEST_BUCKET);
         ff0.assertAttributeEquals("s3.lastModified", String.valueOf(lastModified.getTime()));
         ff0.assertAttributeEquals("s3.version", "1");
         MockFlowFile ff1 = flowFiles.get(1);
         ff1.assertAttributeEquals("filename", "test-key");
-        ff1.assertAttributeEquals("s3.bucket", "test-bucket");
+        ff1.assertAttributeEquals("s3.bucket", TEST_BUCKET);
         ff1.assertAttributeEquals("s3.lastModified", String.valueOf(lastModified.getTime()));
         ff1.assertAttributeEquals("s3.version", "2");
     }
 
     @Test
     public void testListObjectsNothingNew() throws IOException {
-        runner.setProperty(ListS3.REGION, "eu-west-1");
-        runner.setProperty(ListS3.BUCKET, "test-bucket");
+        runner.setProperty(ListS3.REGION, TEST_REGION);
+        runner.setProperty(ListS3.BUCKET, TEST_BUCKET);
 
         Calendar calendar = Calendar.getInstance();
         calendar.set(2017, 5, 2);
@@ -333,7 +355,7 @@ public class TestListS3 {
 
         ObjectListing objectListing = new ObjectListing();
         S3ObjectSummary objectSummary1 = new S3ObjectSummary();
-        objectSummary1.setBucketName("test-bucket");
+        objectSummary1.setBucketName(TEST_BUCKET);
         objectSummary1.setKey("test-key");
         objectSummary1.setLastModified(objectLastModified);
         objectListing.getObjectSummaries().add(objectSummary1);
@@ -344,7 +366,7 @@ public class TestListS3 {
         ArgumentCaptor<ListObjectsRequest> captureRequest = ArgumentCaptor.forClass(ListObjectsRequest.class);
         Mockito.verify(mockS3Client, Mockito.times(1)).listObjects(captureRequest.capture());
         ListObjectsRequest request = captureRequest.getValue();
-        assertEquals("test-bucket", request.getBucketName());
+        assertEquals(TEST_BUCKET, request.getBucketName());
         Mockito.verify(mockS3Client, Mockito.never()).listVersions(Mockito.any());
 
         runner.assertAllFlowFilesTransferred(ListS3.REL_SUCCESS, 0);
